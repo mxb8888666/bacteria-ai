@@ -1,0 +1,19 @@
+# 生成的图片数据（大，不推送）
+ast_data/
+unet_data/
+ast_result/
+unet_result/
+data/
+
+# 文档、截图、PPT（不推送）
+*.docx
+*.pptx
+*.md
+*.ps1
+ppt_images/
+_tmp_read/
+_tmp_segs/
+
+# Python 缓存
+__pycache__/
+*.pyc
