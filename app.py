@@ -167,6 +167,18 @@ def analyze_unet(img_bgr, bacteria):
 # ================= 页面 =================
 st.set_page_config(page_title="药敏抑菌圈智能判读系统", page_icon="🔬", layout="wide")
 
+# 手机屏幕适配：窄屏时图片、按钮、标题自适应
+st.markdown("""
+<style>
+@media screen and (max-width: 768px) {
+    .stApp img { max-width: 100% !important; height: auto !important; }
+    .stButton button { width: 100% !important; }
+    .block-container { padding-left: 0.8rem !important; padding-right: 0.8rem !important; }
+    h1 { font-size: 1.5rem !important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
 if "image" not in st.session_state:
     st.session_state.image = None
     st.session_state.results = None
