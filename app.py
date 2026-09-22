@@ -39,16 +39,21 @@ UNET_PIXELS_PER_MM = PIXELS_PER_MM * UNET_IMG / IMG   # 700图缩到256后的比
 
 # ================= 传统法核心算法 =================
 def detect_disks(gray):
-    """定位纸片：纸片是培养皿里最亮的物体，阈值分割 + 轮廓拟合圆。"""
+    """定位纸片：阈值分割找最亮物体，按面积过滤误检，最多取 4 个。"""
     _, mask = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY)
     res = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = res[0] if len(res) == 2 else res[1]
     disks = []
     for c in contours:
         (x, y), r = cv2.minEnclosingCircle(c)
-        if DISK_R_PX - 6 <= r <= DISK_R_PX + 6:
-            disks.append((int(x), int(y), int(r)))
-    return disks
+        area = cv2.contourArea(c)
+        # 半径在纸片范围，且面积足够大（排除小碎片/噪声误检）
+        if DISK_R_PX - 6 <= r <= DISK_R_PX + 6 and area > 500:
+            disks.append((x, y, r, area))
+    # 按面积从大到小排序，最多取 4 个（示例图只有 4 个纸片）
+    disks.sort(key=lambda d: d[3], reverse=True)
+    disks = disks[:4]
+    return [(int(x), int(y), int(r)) for (x, y, r, _) in disks]
 
 
 def measure_zone_radius(gray, cx, cy, r_max=150):
