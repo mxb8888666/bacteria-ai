@@ -34,6 +34,10 @@ DISK_R = int(3 * PIXELS_PER_MM)   # 纸片半径 3mm ≈ 9px
 N_TRAIN, N_VAL = 160, 30     # 训练/验证样本数
 ANTIBIOTICS = ["头孢他啶", "环丙沙星", "阿米卡星", "左氧氟沙星"]
 
+# 菌苔颜色用 app.py 的 BACTERIA_COLORS（BGR），保证训练与部署分布一致
+BACTERIA_COLORS = [(40, 150, 215), (168, 172, 172), (95, 170, 60),
+                   (120, 180, 200), (60, 60, 190), (145, 168, 178)]
+
 
 def add_lawn(img, rng):
     """涂布菌苔：深色小点模拟细菌均匀生长。"""
@@ -55,8 +59,10 @@ def add_illumination(img):
 def make_plate(rng):
     """生成一张培养皿图和对应掩膜，返回 (img, mask, disks_info)。"""
     img = np.full((IMG, IMG, 3), (200, 180, 145), np.uint8)
-    cv2.circle(img, (CX, CY), PLATE_R, (225, 205, 165), -1)
-    add_lawn(img, rng)
+    color = BACTERIA_COLORS[int(rng.integers(0, len(BACTERIA_COLORS)))]
+    cv2.circle(img, (CX, CY), PLATE_R, color, -1)             # 均匀菌苔(随机菌色，与 app.py 一致)
+    noise = rng.integers(-15, 16, (IMG, IMG, 3))              # 轻微纹理噪声
+    img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
     mask = np.zeros((IMG, IMG), np.uint8)          # 分割掩膜：抑菌圈=255
     disks = []
@@ -71,8 +77,7 @@ def make_plate(rng):
         zone_mm = rng.uniform(8, 22)               # 抑菌圈直径真值(mm)
         zone_r = int(zone_mm / 2 * PIXELS_PER_MM)  # 抑菌圈半径(px)
         cv2.circle(img, (x, y), zone_r, (225, 205, 165), -1)   # 抑菌圈(清亮)
-        cv2.circle(img, (x, y), DISK_R, (250, 250, 250), -1)   # 纸片(白)
-        cv2.circle(img, (x, y), DISK_R, (60, 60, 60), 1)
+        cv2.circle(img, (x, y), DISK_R, (250, 250, 250), -1)   # 纸片(纯白，无黑边)
         cv2.circle(mask, (x, y), zone_r, 255, -1)              # 掩膜=整个抑菌圈
         disks.append((x, y, zone_mm))
 

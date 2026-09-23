@@ -307,12 +307,54 @@ def predict_disks_unet(img_bgr):
     return disks
 
 
-def analyze_unet(img_bgr, bacteria):
-    """U-Net 法：缩放到 256 → 分割抑菌圈 → 量直径 → 判读，返回 (标注图, 结果列表)。"""
+def measure_zone_from_mask(mask, cx, cy, n_angles=72):
+    """从掩膜连通域中心向各方向找外边界，返回 (中位半径, 各方向半径数组)。
+
+    从中心先找第一个掩膜点(进入区域)，再找第一个背景点(离开=外边界)，
+    对实心圆和环形(中间有纸片洞)都正确。
+    """
+    H, W = mask.shape
+    max_r = int(np.sqrt(H * H + W * W))
+    radii = np.arange(0, max_r)
+    ang = np.linspace(0, 2 * np.pi, n_angles, endpoint=False)
+    dir_radii = []
+    for a in ang:
+        xs = np.clip((cx + radii * np.cos(a)).astype(int), 0, W - 1)
+        ys = np.clip((cy + radii * np.sin(a)).astype(int), 0, H - 1)
+        line = mask[ys, xs]                  # 该方向掩膜值序列(255=抑菌圈内,0=外)
+        inside = np.where(line == 255)[0]
+        if not len(inside):
+            continue
+        start = int(inside[0])               # 第一个掩膜点(进入区域)
+        rest = line[start:]
+        zero_after = np.where(rest == 0)[0]
+        if len(zero_after):
+            dir_radii.append(float(radii[start + zero_after[0]]))   # 外边界半径
+    if not dir_radii:
+        return None, None
+    arr = np.array(dir_radii)
+    return float(np.median(arr)), arr
+
+
+def analyze_unet(img_bgr, bacteria, ab_map=None):
+    """U-Net 法：动态比例尺 → 分割抑菌圈 → 72方向测直径(基于掩膜) → 判读。
+
+    和传统法共用：动态比例尺、抗生素绑定、可信度列、异常容错。
+    差别：抑菌圈区域用 U-Net 语义分割(对光照/噪声更鲁棒)，而非径向亮度扫描。
+    ab_map：{纸片索引: 抗生素名}；None 时按位置猜。
+    """
     model = load_unet()
     if model is None:
-        return img_bgr, []             # U-Net 模型缺失：友好返回空，不崩溃
-    # 缩放到 U-Net 训练尺寸 256
+        return img_bgr, []
+
+    # 动态比例尺：和传统法同一套(双校验定位纸片 → 反推 px/mm)
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    disks = detect_disks_dual(img_bgr, gray)
+    scale = estimate_scale(disks) if disks else None
+    if scale is None or scale <= 0:
+        return img_bgr, []
+
+    # U-Net 分割抑菌圈（256 尺度）
     img256 = cv2.resize(img_bgr, (UNET_IMG, UNET_IMG))
     rgb = cv2.cvtColor(img256, cv2.COLOR_BGR2RGB)
     t = torch.from_numpy(rgb.transpose(2, 0, 1)).float().unsqueeze(0) / 255.0
@@ -320,23 +362,48 @@ def analyze_unet(img_bgr, bacteria):
         prob = torch.sigmoid(model(t))[0, 0].cpu().numpy()
     mask = (prob > 0.5).astype(np.uint8) * 255
 
-    # 从分割掩膜找连通域、拟合圆、量直径
+    # 每个连通域：质心 + 72方向测掩膜边界
     n, labels = cv2.connectedComponents(mask)
+    ratio = IMG / UNET_IMG                       # 256 → 700 尺度
     results = []
+    used = set()
     for lab in range(1, n):
         ys, xs = np.where(labels == lab)
-        if len(xs) < 20:                       # 过滤噪声小连通域
+        if len(xs) < 20:                         # 过滤噪声小连通域
             continue
-        pts = np.column_stack([xs, ys]).astype(np.float32)
-        (x, y), r = cv2.minEnclosingCircle(pts)
-        zone_mm = 2 * r / UNET_PIXELS_PER_MM
-        # 256 坐标换算回 700 尺度，用于匹配抗生素位置
-        ab = match_antibiotic(x * IMG / UNET_IMG, y * IMG / UNET_IMG)
+        cx, cy = float(xs.mean()), float(ys.mean())
+        if mask[int(cy), int(cx)] == 0:
+            continue                             # 质心在掩膜外(如背景环形误分割)，跳过
+        r_med, r_arr = measure_zone_from_mask(mask, cx, cy)
+        if r_med is None:
+            continue
+        zone_mm = 2 * r_med * ratio / scale      # 256尺度半径 → 700尺度 → mm
+
+        # 抗生素：用户绑定(匹配最近纸片)或按位置猜
+        cx700, cy700 = cx * ratio, cy * ratio
+        if ab_map is not None:
+            cand = [i for i in range(len(disks)) if i not in used]
+            if not cand:
+                continue
+            best_i = min(cand, key=lambda i: (disks[i][0] - cx700) ** 2
+                                              + (disks[i][1] - cy700) ** 2)
+            ab = ab_map.get(best_i)
+            used.add(best_i)
+        else:
+            ab = match_antibiotic(cx700, cy700)
+        if ab is None:
+            continue
+
+        # 不规则度 + 可信度（和传统法一致）
+        cv = float(np.std(r_arr) / r_med) if r_med > 0 else 0.0
+        note = "形态不规则，建议复核" if cv > 0.15 else ""
+        conf = confidence_of(bacteria, ab, zone_mm, cv)
         verdict = judge(bacteria, ab, zone_mm)
-        results.append({"抗生素": ab, "抑菌圈直径(mm)": round(zone_mm, 1), "判读": verdict})
-        cv2.circle(img256, (int(x), int(y)), int(r), (0, 255, 0), 2)
-        cv2.putText(img256, f"{ABBR[ab]} {zone_mm:.1f}mm {verdict}",
-                    (int(x) - 50, int(y) - int(r) - 6),
+        results.append({"抗生素": ab, "抑菌圈直径(mm)": round(zone_mm, 1),
+                        "判读": verdict, "可信度": conf, "备注": note})
+        cv2.circle(img256, (int(cx), int(cy)), int(r_med), (0, 255, 0), 2)
+        cv2.putText(img256, f"{ABBR.get(ab, ab)} {zone_mm:.1f}mm {verdict}",
+                    (int(cx) - 50, int(cy) - int(r_med) - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
 
     # 放大回 700 显示，便于和传统法结果对比
@@ -491,16 +558,15 @@ if st.session_state.image is not None:
 
     ab_map = None
     disks = []
-    if method == "传统图像处理":
-        # 先检测纸片（左侧图上标序号、右侧下拉框绑定共用这一份结果）
-        gray = cv2.cvtColor(st.session_state.image, cv2.COLOR_BGR2GRAY)
-        disks = detect_disks_dual(st.session_state.image, gray)   # 双校验
+    # 检测纸片：两个分支都先定位纸片（传统法用它定位+测圈；U-Net 法用它算比例尺+匹配药）
+    gray = cv2.cvtColor(st.session_state.image, cv2.COLOR_BGR2GRAY)
+    disks = detect_disks_dual(st.session_state.image, gray)   # 双校验
 
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("原始图")
         img_show = st.session_state.image.copy()
-        if method == "传统图像处理" and disks:
+        if disks:
             # 图上标注纸片序号，与右侧绑定下拉框一一对应
             for i, (x, y, r) in enumerate(disks):
                 cv2.putText(img_show, str(i + 1), (int(x) - 10, int(y) + 10),
@@ -508,36 +574,31 @@ if st.session_state.image is not None:
         st.image(cv2.cvtColor(img_show, cv2.COLOR_BGR2RGB), width="stretch")
 
     with col2:
-        if method == "传统图像处理":
-            st.subheader("绑定抗生素")
-            ab_options = antibiotics_for(bacteria)
-            if not disks:
-                st.warning("未检测到药敏纸片，请确认照片清晰、纸片为白色圆片。")
-            elif not ab_options:
-                st.warning("该菌种暂无 CLSI 断点数据，判读会显示「未知」。请切换其他菌种。")
-            else:
-                st.caption(f"检测到 {len(disks)} 个纸片，序号已标注在左侧图上，"
-                           "请为每个纸片选择对应的抗生素：")
-                ab_map = {}
-                for i, (x, y, r) in enumerate(disks):
-                    default_ab = match_antibiotic(x, y)
-                    default_idx = (ab_options.index(default_ab)
-                                   if default_ab in ab_options else 0)
-                    ab_map[i] = st.selectbox(
-                        f"纸片 {i + 1}（圆心 {int(x)}, {int(y)}）",
-                        ab_options,
-                        index=default_idx,
-                        key=f"ab_{bacteria}_{i}")
+        st.subheader("绑定抗生素")
+        ab_options = antibiotics_for(bacteria)
+        if not disks:
+            st.warning("未检测到药敏纸片，请确认照片清晰、纸片为白色圆片。")
+        elif not ab_options:
+            st.warning("该菌种暂无 CLSI 断点数据，判读会显示「未知」。请切换其他菌种。")
         else:
-            st.subheader("判读结果")
-            if st.session_state.results is None:
-                st.info("U-Net 自动分割抑菌圈并判读，点击「开始判读」查看结果。")
+            st.caption(f"检测到 {len(disks)} 个纸片，序号已标注在左侧图上，"
+                       "请为每个纸片选择对应的抗生素：")
+            ab_map = {}
+            for i, (x, y, r) in enumerate(disks):
+                default_ab = match_antibiotic(x, y)
+                default_idx = (ab_options.index(default_ab)
+                               if default_ab in ab_options else 0)
+                ab_map[i] = st.selectbox(
+                    f"纸片 {i + 1}（圆心 {int(x)}, {int(y)}）",
+                    ab_options,
+                    index=default_idx,
+                    key=f"ab_{bacteria}_{i}")
 
     if st.button("开始判读", type="primary", icon=":material/search:"):
         try:
             img_copy = st.session_state.image.copy()
             if method == "U-Net 深度学习":
-                annotated, results = analyze_unet(img_copy, bacteria)
+                annotated, results = analyze_unet(img_copy, bacteria, ab_map=ab_map)
             else:
                 annotated, results = analyze(img_copy, bacteria, ab_map=ab_map)
             st.session_state.annotated = annotated
