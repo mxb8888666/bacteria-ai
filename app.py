@@ -489,22 +489,35 @@ if st.session_state.image is not None:
     method = st.segmented_control(
         "判读方法", ["传统图像处理", "U-Net 深度学习"], default="传统图像处理")
 
+    ab_map = None
+    disks = []
+    if method == "传统图像处理":
+        # 先检测纸片（左侧图上标序号、右侧下拉框绑定共用这一份结果）
+        gray = cv2.cvtColor(st.session_state.image, cv2.COLOR_BGR2GRAY)
+        disks = detect_disks_dual(st.session_state.image, gray)   # 双校验
+
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("原始图")
-        st.image(cv2.cvtColor(st.session_state.image, cv2.COLOR_BGR2RGB), width="stretch")
+        img_show = st.session_state.image.copy()
+        if method == "传统图像处理" and disks:
+            # 图上标注纸片序号，与右侧绑定下拉框一一对应
+            for i, (x, y, r) in enumerate(disks):
+                cv2.putText(img_show, str(i + 1), (int(x) - 10, int(y) + 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+        st.image(cv2.cvtColor(img_show, cv2.COLOR_BGR2RGB), width="stretch")
 
-    ab_map = None
     with col2:
         if method == "传统图像处理":
             st.subheader("绑定抗生素")
-            gray = cv2.cvtColor(st.session_state.image, cv2.COLOR_BGR2GRAY)
-            disks = detect_disks_dual(st.session_state.image, gray)   # 双校验
             ab_options = antibiotics_for(bacteria)
             if not disks:
                 st.warning("未检测到药敏纸片，请确认照片清晰、纸片为白色圆片。")
+            elif not ab_options:
+                st.warning("该菌种暂无 CLSI 断点数据，判读会显示「未知」。请切换其他菌种。")
             else:
-                st.caption(f"检测到 {len(disks)} 个纸片，请为每个纸片选择对应的抗生素：")
+                st.caption(f"检测到 {len(disks)} 个纸片，序号已标注在左侧图上，"
+                           "请为每个纸片选择对应的抗生素：")
                 ab_map = {}
                 for i, (x, y, r) in enumerate(disks):
                     default_ab = match_antibiotic(x, y)
