@@ -12,14 +12,25 @@ CLSI 药敏判读标准 —— 抑菌圈直径断点表（单位：mm）
 "标准是权威数据来源，代码只是把规则自动化"，说明你懂临床规范的严肃性。
 """
 
-BREAKPOINTS = {
-    ("大肠杆菌", "头孢他啶"):   {"S": 21, "R": 17},
-    ("大肠杆菌", "环丙沙星"):   {"S": 21, "R": 15},
-    ("大肠杆菌", "阿米卡星"):   {"S": 17, "R": 14},
-    ("大肠杆菌", "左氧氟沙星"): {"S": 19, "R": 13},
-    ("金黄色葡萄球菌", "青霉素"):   {"S": 29, "R": 28},
-    ("金黄色葡萄球菌", "万古霉素"): {"S": 17, "R": None},  # R=None 表示该药无耐药断点
-}
+import json
+import os
+
+# 断点表统一放在 config.json：新增菌种/抗生素只改配置文件，不用改代码
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
+def _load_breakpoints():
+    """读 config.json 的断点表，转成 {(菌种, 抗生素): {"S":.., "R":..}} 扁平字典。"""
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        cfg = json.load(f)
+    flat = {}
+    for bac, abs_map in cfg["breakpoints"].items():
+        for ab, b in abs_map.items():
+            flat[(bac, ab)] = b
+    return flat
+
+
+BREAKPOINTS = _load_breakpoints()
 
 
 def judge(bacteria, antibiotic, zone_mm):

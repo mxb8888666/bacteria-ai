@@ -17,3 +17,4 @@ _tmp_segs/
 # Python 缓存
 __pycache__/
 *.pyc
+disk_data/

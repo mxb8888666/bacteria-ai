@@ -18,15 +18,17 @@ import os
 import random
 from PIL import Image, ImageDraw
 
-# 6 种常见细菌/真菌，颜色模拟它们在培养基上的真实菌落特征色
-# 金黄色葡萄球菌=金色、铜绿假单胞菌=绿色、黏质沙雷菌=红色，都是临床检验的真实特征
+# 6 种常见细菌/真菌的菌苔特征色(RGB)。金葡菌=金色、铜绿=绿色、黏质沙雷=红色。
+# 约束：菌苔灰度必须明显低于琼脂(灰度195)，否则抑菌圈边界检测(亮琼脂→暗菌苔)
+# 会失效。深色 4 种用原始鲜艳色；浅色 2 种调暗(灰度<175)并用色相区分：
+# 大肠杆菌=中性灰白，白色念珠菌=奶油偏黄。
 CLASSES = {
     "金黄色葡萄球菌": (215, 150, 40),
-    "大肠杆菌": (235, 235, 225),
-    "铜绿假单胞菌": (60, 170, 95),
-    "枯草芽孢杆菌": (200, 180, 120),
-    "黏质沙雷菌": (190, 60, 60),
-    "白色念珠菌": (245, 245, 245),
+    "大肠杆菌":       (172, 172, 168),
+    "铜绿假单胞菌":   (60, 170, 95),
+    "枯草芽孢杆菌":   (200, 180, 120),
+    "黏质沙雷菌":     (190, 60, 60),
+    "白色念珠菌":     (178, 168, 145),
 }
 
 IMG_SIZE = 224          # 图片边长，和 train.py 的 Resize 一致
@@ -34,17 +36,21 @@ NUM_PER_CLASS = 50      # 每个菌种生成多少张（演示用 50 张足够�
 
 
 def make_one_image(rgb, out_path):
-    """生成一张 224x224 图像：浅色培养基背景 + 若干该菌种的菌落圆点。"""
-    img = Image.new("RGB", (IMG_SIZE, IMG_SIZE), (245, 242, 230))  # 培养基浅黄背景
-    draw = ImageDraw.Draw(img)
+    """生成一张 224x224 菌苔图：菌种特征色铺满 + 轻微纹理噪声（模拟涂布菌苔）。
 
-    for _ in range(random.randint(5, 15)):          # 每张图随机 5~15 个菌落
-        x = random.randint(10, IMG_SIZE - 10)       # 随机位置
-        y = random.randint(10, IMG_SIZE - 10)
-        r = random.randint(6, 20)                   # 随机大小
-        # 对基准色做轻微抖动，让同类内部也有差异，更接近真实拍摄
-        color = tuple(max(0, min(255, c + random.randint(-18, 18))) for c in rgb)
-        draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
+    药敏平板(K-B)上菌悬液涂布后长成均匀菌苔，颜色由菌种决定；
+    菌种识别模型靠菌苔颜色分辨菌种，所以这里生成"均匀色块+纹理"而非离散菌落。
+    """
+    img = Image.new("RGB", (IMG_SIZE, IMG_SIZE), rgb)   # 菌苔特征色铺满
+    draw = ImageDraw.Draw(img)
+    # 噪声密度/幅度每张随机，逼模型把颜色当主特征、忽略噪声纹理模式
+    n = random.randint(500, 5000)
+    amp = random.randint(8, 20)
+    for _ in range(n):
+        x = random.randint(0, IMG_SIZE - 1)
+        y = random.randint(0, IMG_SIZE - 1)
+        c = tuple(max(0, min(255, v + random.randint(-amp, amp))) for v in rgb)
+        draw.point((x, y), fill=c)
     img.save(out_path, quality=92)
 
 
