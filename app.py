@@ -114,18 +114,22 @@ def detect_disks(gray):
 def detect_disks_dual(img_bgr, gray):
     """双校验检测纸片：传统阈值法 + U-Net 分割，两个方法都检出同一位置才确认。
 
-    三层防线：
+    防线：
       1. 半径一致性：K-B 纸片直径固定 6mm，真纸片半径应该聚成一簇，
          明显偏大/偏小(相对中位数±40%)的是假阳性(标签/亮斑/杂物)
-      2. 位置重合：传统和 U-Net 检出的圆心要重合
-      3. 数量上限：确认后最多取 4 个
-    U-Net 不可用或没检出时，退回传统结果(不因校验失效而漏检)。
+      2. 位置重合：U-Net 可用时，传统和 U-Net 都要检出同一位置
+    U-Net 不可用(如真实照片，纸片U-Net是合成图训练的认不出)或没检出时，
+    退回传统结果 + 半径一致性过滤，不硬编码纸片数量。
     """
     disks_trad = detect_disks(gray)
     disks_unet = predict_disks_unet(img_bgr)
+    r_med = float(np.median([r for (_, _, r) in disks_trad])) if disks_trad else 0.0
+
     if not disks_unet:
-        return disks_trad[:4]
-    r_med = float(np.median([r for (_, _, r) in disks_trad]))   # 纸片参考半径
+        # U-Net 不可用：退回传统 + 半径一致性(±40%)
+        return [(x, y, r) for (x, y, r) in disks_trad
+                if 0.6 * r_med <= r <= 1.4 * r_med]
+
     confirmed = []
     for (x, y, r) in disks_trad:
         if not (0.6 * r_med <= r <= 1.4 * r_med):
@@ -135,7 +139,7 @@ def detect_disks_dual(img_bgr, gray):
                 confirmed.append((x, y, r))
                 break
     confirmed.sort(key=lambda d: -d[2])
-    return confirmed[:4]
+    return confirmed
 
 
 def estimate_scale(disks):
