@@ -63,14 +63,25 @@ def antibiotics_for(bacteria):
     return [ab for (bac, ab) in BREAKPOINTS if bac == bacteria]
 
 
-# ================= 传统法核心算法 =================
-def detect_disks(gray):
-    """定位纸片：找最亮圆形物体，用半径+圆度过滤误检，最多取 4 个。
+def letterbox(img, size=IMG):
+    """等比缩放到 size×size，四周黑色填充(不拉伸变形)。
 
-    真实照片拍摄距离不定，纸片像素半径会变，所以用宽松的半径范围；
-    再用「圆度」(轮廓面积/外接圆面积) 排除长条、不规则等噪声。
+    真实照片常不是正方形，直接 resize 会拉伸变形；
+    等比缩放 + 黑边填充能保持纸片/抑菌圈的真实形状。
     """
-    _, mask = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY)
+    h, w = img.shape[:2]
+    s = size / max(h, w)
+    r = cv2.resize(img, (int(w * s), int(h * s)))
+    canvas = np.zeros((size, size, 3), np.uint8)
+    x0, y0 = (size - r.shape[1]) // 2, (size - r.shape[0]) // 2
+    canvas[y0:y0 + r.shape[0], x0:x0 + r.shape[1]] = r
+    return canvas
+
+
+# ================= 传统法核心算法 =================
+def _detect_disks_thr(gray, thr):
+    """用指定阈值检测纸片（内部函数）：阈值分割找最亮圆形物体。"""
+    _, mask = cv2.threshold(gray, thr, 255, cv2.THRESH_BINARY)
     res = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = res[0] if len(res) == 2 else res[1]
     disks = []
@@ -85,6 +96,19 @@ def detect_disks(gray):
     disks = disks[:10]                             # 双校验会进一步筛选，这里多留候选
     # r 保留浮点精度：动态比例尺靠它反推，int 截断会带来约 4% 系统误差
     return [(int(x), int(y), float(r)) for (x, y, r, _) in disks]
+
+
+def detect_disks(gray):
+    """定位纸片：先试固定阈值 235(合成图)，检测不到就换自适应阈值(真实照片)。
+
+    真实照片的纸片灰度(约 190)比合成图(250)暗，固定 235 会漏检；
+    自适应阈值取灰度 P98 减 margin，能捕获"图像里最亮的一小簇"(纸片)。
+    """
+    disks = _detect_disks_thr(gray, 235)
+    if disks:
+        return disks
+    thr = float(np.percentile(gray, 98)) - 25
+    return _detect_disks_thr(gray, thr)
 
 
 def detect_disks_dual(img_bgr, gray):
@@ -130,8 +154,11 @@ def estimate_scale(disks):
 def measure_zone(gray, cx, cy, disk_r, r_max=150):
     """多方向测量抑菌圈：沿 N 个方向各扫一条径向亮度曲线，分别找边界。
 
+    边界 = 抑菌圈亮峰之后的下降点(真正菌苔边界)，而非第一个亮度突降。
+    原因：真实照片里纸片外有一圈阴影(暗环)，旧的"第一个突降"会误把阴影当边界；
+    正确结构是 纸片(亮)→阴影(暗)→抑菌圈(亮)→菌苔(暗)，要找最后的"亮→暗"过渡。
+
     返回 (中位半径px, 各方向半径数组)；测不到返回 (None, None)。
-    中位数比单一方向更抗噪、更能代表不规则圈；各方向半径数组用于判断形态是否规则。
     """
     radii = np.arange(disk_r + 2, r_max)
     ang = np.linspace(0, 2 * np.pi, 72, endpoint=False)   # 72 个方向
@@ -141,18 +168,20 @@ def measure_zone(gray, cx, cy, disk_r, r_max=150):
         xs = np.clip((cx + radii * np.cos(a)).astype(int), 0, W - 1)
         ys = np.clip((cy + radii * np.sin(a)).astype(int), 0, H - 1)
         profile = gray[ys, xs].astype(float)    # 该方向的亮度曲线
-        # 滑动平均平滑(正确处理边缘)，降低菌苔噪点对边界定位的干扰
+        # 滑动平均平滑(正确处理边缘)，降低噪点对边界定位的干扰
         half = 2
         profile = np.array([
             profile[max(0, i - half):min(len(profile), i + half + 1)].mean()
             for i in range(len(profile))
         ])
-        hi = profile[:10].mean()                # 靠近纸片处(亮)
-        lo = profile[-10:].mean()               # 远处(暗)
-        thr = (hi + lo) / 2
-        below = np.where(profile < thr)[0]
-        if len(below):
-            dir_radii.append(float(radii[below[0]]))
+        # 抑菌圈亮峰(纸片阴影之后的局部最亮)，峰之后降到菌苔水平处 = 边界
+        peak_idx = int(np.argmax(profile))
+        peak = profile[peak_idx]
+        tail = profile[peak_idx:].min() if peak_idx < len(profile) - 1 else peak
+        thr = (peak + tail) / 2
+        after = np.where(profile[peak_idx:] < thr)[0]
+        if len(after):
+            dir_radii.append(float(radii[peak_idx + after[0]]))
     if not dir_radii:
         return None, None
     arr = np.array(dir_radii)
@@ -524,8 +553,14 @@ col_up, col_btn = st.columns([3, 1], vertical_alignment="bottom")
 with col_up:
     uploaded = st.file_uploader("上传培养皿照片（jpg/png）", type=["jpg", "jpeg", "png"])
 with col_btn:
-    if st.button("生成示例培养皿", icon=":material/science:", width="stretch"):
+    if st.button("生成合成示例", icon=":material/science:", width="stretch"):
         load_and_detect(make_sample_plate(st.session_state.bacteria))
+    if st.button("加载真实平板", icon=":material/image:", width="stretch"):
+        real = cv2.imread(os.path.join(BASE_DIR, "real_plate.png"))
+        if real is not None:
+            load_and_detect(letterbox(real, IMG))
+        else:
+            st.warning("找不到真实平板照片 real_plate.png")
 
 if uploaded is not None:
     arr = np.frombuffer(uploaded.getvalue(), np.uint8)
@@ -534,7 +569,7 @@ if uploaded is not None:
         st.warning("图片解析失败，请上传 jpg/png 格式的照片。")
     else:
         if img_bgr.shape[:2] != (IMG, IMG):
-            img_bgr = cv2.resize(img_bgr, (IMG, IMG))
+            img_bgr = letterbox(img_bgr, IMG)   # 等比缩放，不拉伸变形
         load_and_detect(img_bgr)
 
 # —— 侧边栏：判读设置 ——
