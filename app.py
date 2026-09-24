@@ -39,7 +39,8 @@ DISK_R_MM = DISK_DIAMETER_MM / 2.0        # 纸片半径 3mm
 DISK_R_MIN, DISK_R_MAX = 8, 80            # 检测纸片的像素半径宽松范围(覆盖不同拍摄距离)
 ANTIBIOTICS = ["头孢他啶", "环丙沙星", "阿米卡星", "左氧氟沙星"]
 POSITIONS = [(CX, CY - 150), (CX, CY + 150), (CX - 150, CY), (CX + 150, CY)]
-ABBR = {"头孢他啶": "CAZ", "环丙沙星": "CIP", "阿米卡星": "AMK", "左氧氟沙星": "LEV"}
+ABBR = {"头孢他啶": "CAZ", "环丙沙星": "CIP", "阿米卡星": "AMK",
+        "左氧氟沙星": "LEV", "氨曲南": "ATM"}
 
 # 各菌种在培养基上的特征色(BGR)：与 make_demo_data 的 RGB 特征色一一对应。
 # 约束：菌苔灰度必须明显低于琼脂(灰度195)，否则抑菌圈边界检测(亮琼脂→暗菌苔)
@@ -190,9 +191,15 @@ def measure_zone(gray, cx, cy, disk_r, r_max=150):
             if len(above):
                 dir_radii.append(float(radii[vi + above[0]]))
         else:
-            # 合成图：无阴影、单调下降，边界 = 峰值后降到中点
+            # 合成图：无阴影、单调下降，边界 = 峰值后降到"峰后窗口平均"的中点
             peak_idx = int(np.argmax(profile))
-            thr = (float(profile[peak_idx]) + float(profile.min())) / 2
+            peak = float(profile[peak_idx])
+            lo = min(peak_idx + 10, len(profile))
+            hi = min(peak_idx + 20, len(profile))
+            if hi <= lo:
+                continue
+            lawn = float(profile[lo:hi].mean())
+            thr = (peak + lawn) / 2
             after = np.where(profile[peak_idx:] < thr)[0]
             if len(after):
                 dir_radii.append(float(radii[peak_idx + after[0]]))
