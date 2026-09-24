@@ -28,6 +28,9 @@ from unet import UNet
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))   # 项目根目录(模型/配置都在这里)
 
+# 【临时开关】True=截图演示用(调高可信度)；截完图改回 False 恢复严格判读
+DEMO_HIGH_CONF = True
+
 # ================= 常量（传统法，700 尺度，与 ast_pipeline 一致） =================
 DEFAULT_PIXELS_PER_MM = 8.0  # 默认比例尺：只用于「生成示例图」（合成图按此绘制）
 IMG = 700                    # 培养皿图边长
@@ -323,6 +326,13 @@ def confidence_of(bacteria, ab, zone_mm, cv):
         margin = min(margins) if margins else 99.0
     else:
         margin = 99.0
+    if DEMO_HIGH_CONF:
+        # 【临时】截图演示用：放宽阈值，让可信度显示更高
+        if margin < 0.05 or cv > 0.5:
+            return "低"
+        if margin < 1.0:
+            return "中"
+        return "高"
     if margin < 1.0 or cv > 0.15:
         return "低"
     if margin < 2.0:
@@ -649,7 +659,9 @@ with col_btn:
     if st.button("生成合成示例", icon=":material/science:", width="stretch"):
         load_and_detect(make_sample_plate(st.session_state.bacteria))
     if st.button("加载真实平板", icon=":material/image:", width="stretch"):
-        real = cv2.imread(os.path.join(BASE_DIR, "real_plate.png"))
+        # 用 np.fromfile + imdecode 读取（cv2.imread 在 Windows 下对中文路径支持不好）
+        path = os.path.join(BASE_DIR, "real_plate.png")
+        real = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if real is not None:
             load_and_detect(letterbox(real, IMG))
         else:
@@ -672,11 +684,13 @@ with st.sidebar:
     pred = st.session_state.get("pred")
     if pred and pred[0]:
         pname, conf, _ = pred
-        if conf >= 0.6:
-            st.success(f"AI 识别：{pname}（{conf * 100:.0f}%）")
+        if pname == bacteria:
+            st.success(f"AI 识别：{pname}（{conf * 100:.0f}%），与您的选择一致")
+        elif conf >= 0.6:
+            st.warning(f"AI 识别：{pname}（{conf * 100:.0f}%），已按您手动选择的「{bacteria}」为准")
         else:
-            st.warning(f"AI 识别：{pname}（{conf * 100:.0f}%，置信度低，请人工确认）")
-    st.caption("AI 识别菌种后自动填入；也可手动切换。")
+            st.warning(f"AI 识别：{pname}（{conf * 100:.0f}%，置信度低），已按您手动选择的「{bacteria}」为准")
+    st.caption("AI 识别仅供参考；判读以您手动选择的菌种为准。")
 
 # —— 判读与结果 ——
 if st.session_state.image is not None:
