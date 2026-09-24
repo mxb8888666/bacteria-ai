@@ -37,10 +37,13 @@ DISK_R_PX = 24               # 示例图纸片半径(px) = 3mm × 8px/mm
 DISK_DIAMETER_MM = 6.0       # K-B 药敏纸片标准直径(固定值，不随拍摄距离变)
 DISK_R_MM = DISK_DIAMETER_MM / 2.0        # 纸片半径 3mm
 DISK_R_MIN, DISK_R_MAX = 8, 80            # 检测纸片的像素半径宽松范围(覆盖不同拍摄距离)
-ANTIBIOTICS = ["头孢他啶", "环丙沙星", "阿米卡星", "左氧氟沙星"]
-POSITIONS = [(CX, CY - 150), (CX, CY + 150), (CX - 150, CY), (CX + 150, CY)]
+ANTIBIOTICS = ["氨苄西林", "庆大霉素", "环丙沙星", "头孢唑林", "四环素"]
+# 5 个纸片位置：上方/左上/右上/左下/右下（与真实平板布局一致）
+POSITIONS = [(CX, CY - 150), (CX - 110, CY - 70), (CX + 110, CY - 70),
+             (CX - 110, CY + 80), (CX + 110, CY + 80)]
 ABBR = {"头孢他啶": "CAZ", "环丙沙星": "CIP", "阿米卡星": "AMK",
-        "左氧氟沙星": "LEV", "氨曲南": "ATM"}
+        "左氧氟沙星": "LEV", "氨曲南": "ATM", "氨苄西林": "AMP",
+        "庆大霉素": "GEN", "头孢唑林": "CFZ", "四环素": "TET"}
 
 # 各菌种在培养基上的特征色(BGR)：与 make_demo_data 的 RGB 特征色一一对应。
 # 约束：菌苔灰度必须明显低于琼脂(灰度195)，否则抑菌圈边界检测(亮琼脂→暗菌苔)
@@ -52,6 +55,10 @@ BACTERIA_COLORS = {
     "枯草芽孢杆菌":   (120, 180, 200),   # 米黄
     "黏质沙雷菌":     (60, 60, 190),     # 红色
     "白色念珠菌":     (145, 168, 178),   # 奶油偏黄
+    "肺炎克雷伯菌":   (155, 125, 170),   # 灰紫
+    "鲍曼不动杆菌":   (180, 165, 135),   # 灰蓝
+    "粪肠球菌":       (150, 180, 150),   # 灰绿
+    "表皮葡萄球菌":   (135, 165, 185),   # 浅棕
 }
 
 # ================= 常量（U-Net，256 尺度，与 unet_predict 一致） =================
@@ -62,6 +69,48 @@ UNET_PIXELS_PER_MM = DEFAULT_PIXELS_PER_MM * UNET_IMG / IMG   # 700图缩到256�
 def antibiotics_for(bacteria):
     """返回某菌种在 CLSI 断点表里收录的抗生素列表（用于下拉框选项）。"""
     return [ab for (bac, ab) in BREAKPOINTS if bac == bacteria]
+
+
+# Tesseract 引擎路径：本地安装 Tesseract 后若不在系统 PATH，在此配置一次即可
+# 例：TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+TESSERACT_CMD = None
+
+
+def ocr_disk_text(crop_bgr):
+    """识别纸片裁剪图上的药名缩写(如 CAZ/CIP)。返回大写文本，识别不到返回 None。
+
+    【设计】OCR 引擎封装在此函数内：以后换引擎(如 EasyOCR/PaddleOCR)只改这里，
+    调用方无感知。当前用 Tesseract，未安装时优雅降级返回 None。
+    """
+    try:
+        import pytesseract
+    except ImportError:
+        return None
+    try:
+        if TESSERACT_CMD:
+            pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+        # 放大 4 倍 + 大津二值化，提高小字识别率
+        gray = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        text = pytesseract.image_to_string(
+            binary, config="--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        return text.strip().upper()
+    except Exception:
+        return None
+
+
+def match_abbr_to_antibiotic(text):
+    """把 OCR 识别出的文本匹配到抗生素全名(缩写→全名)。匹配不到返回 None。
+
+    【设计】缩写映射集中放在 ABBR 字典，新增药只需改 ABBR，这里不用动。
+    """
+    if not text:
+        return None
+    for full, abbr in ABBR.items():
+        if abbr in text or text in abbr:
+            return full
+    return None
 
 
 def letterbox(img, size=IMG):
@@ -219,6 +268,26 @@ def match_antibiotic(x, y):
     return best
 
 
+def assign_antibiotics(disks):
+    """按纸片相对位置(上方/左上/右上/左下/右下)分配抗生素。
+
+    返回 {纸片索引: 抗生素名}。纸片数不是 5 时退回按最近预设位置逐个匹配。
+    """
+    n = len(disks)
+    if n == 0:
+        return {}
+    if n != 5:
+        return {i: match_antibiotic(x, y) for i, (x, y, r) in enumerate(disks)}
+    # 5 纸片：按 y 找上方，其余按 y 分上下两组、再按 x 分左右
+    by_y = sorted(range(n), key=lambda i: disks[i][1])
+    top = by_y[0]
+    rest = sorted(by_y[1:], key=lambda i: disks[i][1])
+    upper = sorted(rest[:2], key=lambda i: disks[i][0])
+    lower = sorted(rest[2:], key=lambda i: disks[i][0])
+    order = [top, upper[0], upper[1], lower[0], lower[1]]
+    return {idx: ANTIBIOTICS[pos] for pos, idx in enumerate(order)}
+
+
 def make_sample_plate(bacteria="大肠杆菌"):
     """生成一张示例培养皿（菌苔按菌种特征色 + 4 个药敏纸片），返回 BGR 图。
 
@@ -237,6 +306,9 @@ def make_sample_plate(bacteria="大肠杆菌"):
         zone_r = int(zone_mm / 2 * DEFAULT_PIXELS_PER_MM)
         cv2.circle(img, (x, y), zone_r, (225, 205, 165), -1)   # 抑菌圈(琼脂亮，无菌)
         cv2.circle(img, (x, y), DISK_R_PX, (250, 250, 250), -1)  # 纸片(纯白，无黑边)
+        # 纸片中央印药名缩写(黑字)，模拟真实纸片，供 OCR 自动识别演示
+        cv2.putText(img, ABBR[ab], (int(x) - 7, int(y) + 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
     return img
 
 
@@ -640,15 +712,38 @@ if st.session_state.image is not None:
             st.caption(f"检测到 {len(disks)} 个纸片，序号已标注在左侧图上，"
                        "请为每个纸片选择对应的抗生素：")
             ab_map = {}
+            default_map = assign_antibiotics(disks)   # 按相对位置预分配药物
             for i, (x, y, r) in enumerate(disks):
-                default_ab = match_antibiotic(x, y)
-                default_idx = (ab_options.index(default_ab)
-                               if default_ab in ab_options else 0)
-                ab_map[i] = st.selectbox(
-                    f"纸片 {i + 1}（圆心 {int(x)}, {int(y)}）",
-                    ab_options,
-                    index=default_idx,
-                    key=f"ab_{bacteria}_{i}")
+                # 裁剪纸片区域（OCR 识别 和 放大显示 共用）
+                pad = max(int(r * 2.2), 18)
+                H, W = st.session_state.image.shape[:2]
+                x0, x1 = max(0, int(x) - pad), min(W, int(x) + pad)
+                y0, y1 = max(0, int(y) - pad), min(H, int(y) + pad)
+                crop = st.session_state.image[y0:y1, x0:x1]
+
+                # 先尝试 OCR 自动识别纸片上的药名缩写
+                ocr_ab = match_abbr_to_antibiotic(ocr_disk_text(crop))
+
+                if ocr_ab and ocr_ab in ab_options:
+                    # 识别成功：自动填入，不显示放大图
+                    ab_map[i] = st.selectbox(
+                        f"纸片 {i + 1}（圆心 {int(x)}, {int(y)}）· 已识别 {ABBR[ocr_ab]}",
+                        ab_options, index=ab_options.index(ocr_ab),
+                        key=f"ab_{bacteria}_{i}")
+                else:
+                    # 识别失败：显示放大图，手动选
+                    c1, c2 = st.columns([3, 2])
+                    with c1:
+                        default_ab = default_map.get(i)
+                        default_idx = (ab_options.index(default_ab)
+                                       if default_ab in ab_options else 0)
+                        ab_map[i] = st.selectbox(
+                            f"纸片 {i + 1}（圆心 {int(x)}, {int(y)}）· 未识别，请手动选",
+                            ab_options, index=default_idx,
+                            key=f"ab_{bacteria}_{i}")
+                    with c2:
+                        st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB),
+                                 caption=f"纸片 {i + 1}（看药名）", width=110)
 
     if st.button("开始判读", type="primary", icon=":material/search:"):
         try:
