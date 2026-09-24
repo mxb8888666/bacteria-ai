@@ -29,7 +29,7 @@ from unet import UNet
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))   # 项目根目录(模型/配置都在这里)
 
 # 【临时开关】True=截图演示用(调高可信度)；截完图改回 False 恢复严格判读
-DEMO_HIGH_CONF = True
+DEMO_HIGH_CONF = False
 
 # ================= 常量（传统法，700 尺度，与 ast_pipeline 一致） =================
 DEFAULT_PIXELS_PER_MM = 8.0  # 默认比例尺：只用于「生成示例图」（合成图按此绘制）
