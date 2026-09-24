@@ -152,11 +152,10 @@ def estimate_scale(disks):
 
 
 def measure_zone(gray, cx, cy, disk_r, r_max=150):
-    """多方向测量抑菌圈：沿 N 个方向各扫一条径向亮度曲线，分别找边界。
+    """多方向测量抑菌圈：每个方向找「纸片阴影谷 → 抑菌圈峰」回升段的中点作边界。
 
-    边界 = 抑菌圈亮峰之后的下降点(真正菌苔边界)，而非第一个亮度突降。
-    原因：真实照片里纸片外有一圈阴影(暗环)，旧的"第一个突降"会误把阴影当边界；
-    正确结构是 纸片(亮)→阴影(暗)→抑菌圈(亮)→菌苔(暗)，要找最后的"亮→暗"过渡。
+    真实照片结构：纸片(亮)→阴影谷(暗)→抑菌圈(回升到峰)→菌苔(稍暗)，
+    边界在阴影谷到抑菌圈峰的回升中点(约50%)处，用人工标注真值校准得到。
 
     返回 (中位半径px, 各方向半径数组)；测不到返回 (None, None)。
     """
@@ -174,14 +173,25 @@ def measure_zone(gray, cx, cy, disk_r, r_max=150):
             profile[max(0, i - half):min(len(profile), i + half + 1)].mean()
             for i in range(len(profile))
         ])
-        # 抑菌圈亮峰(纸片阴影之后的局部最亮)，峰之后降到菌苔水平处 = 边界
-        peak_idx = int(np.argmax(profile))
-        peak = profile[peak_idx]
-        tail = profile[peak_idx:].min() if peak_idx < len(profile) - 1 else peak
-        thr = (peak + tail) / 2
-        after = np.where(profile[peak_idx:] < thr)[0]
-        if len(after):
-            dir_radii.append(float(radii[peak_idx + after[0]]))
+        n = len(profile)
+        # 局部谷：纸片边缘后前 40px 内的最暗(阴影谷/菌苔谷)
+        vi = int(np.argmin(profile[:min(40, n)]))
+        # 抑菌圈峰：局部谷之后的最亮
+        pi = vi + int(np.argmax(profile[vi:]))
+        v, p = float(profile[vi]), float(profile[pi])
+        if p - v > 20:
+            # 真实照片：有明显阴影谷+回升，边界 = 谷到峰的回升 50%
+            thr = v + (p - v) * 0.5
+            above = np.where(profile[vi:pi + 1] > thr)[0]
+            if len(above):
+                dir_radii.append(float(radii[vi + above[0]]))
+        else:
+            # 合成图：无阴影、单调下降，边界 = 峰值后降到中点
+            peak_idx = int(np.argmax(profile))
+            thr = (float(profile[peak_idx]) + float(profile.min())) / 2
+            after = np.where(profile[peak_idx:] < thr)[0]
+            if len(after):
+                dir_radii.append(float(radii[peak_idx + after[0]]))
     if not dir_radii:
         return None, None
     arr = np.array(dir_radii)
